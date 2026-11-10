@@ -36,7 +36,7 @@ MASK_BACKGROUND = 0         # black = usable
 # disk so the user has something to edit)
 # ======================================================================
 DEFAULT_CONFIG = {
-    "camera_source": "1",  # "auto", a camera index such as 0, or a stream URL
+    "camera_source": "0",  # "auto", a camera index such as 0, or a stream URL
     "grades": ["A", "B", "C", "D", "Waste"],
     "size_categories": ["5ft", "6ft", "7ft", "8ft", "9ft", "10ft", "11ft", "12ft"],
     "defect_types": ["Vein Marks", "Lamp Skin", "Spots", "Scars", "Wrinkles", "Holes"],
