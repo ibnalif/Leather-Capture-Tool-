@@ -1,6 +1,6 @@
 Set-Location -Path $PSScriptRoot
 Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host "Starting Leather Dual-Side Capture Tool" -ForegroundColor Cyan
+Write-Host "Starting Leather Dataset Capture & Ingestion Suite" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
 # Setup ADB reverse for USB if available
@@ -9,11 +9,10 @@ if (-not $adb -and (Test-Path "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.
     $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 }
 if ($adb) {
-    Write-Host "[INFO] Setting up USB port forward over ADB..." -ForegroundColor Green
+    Write-Host "[INFO] Setting up USB port forward over ADB (Port 5000)..." -ForegroundColor Green
     & $adb reverse tcp:5000 tcp:5000
 }
 
-Write-Host "[INFO] PC Wi-Fi IP Address: http://192.168.1.4:5000" -ForegroundColor Yellow
-Write-Host "[INFO] Launching Python Desktop Tool..." -ForegroundColor Green
-python "$PSScriptRoot\leather_capture_tool_dual.py"
+Write-Host "[INFO] Launching Desktop Capture Tool..." -ForegroundColor Green
+python "$PSScriptRoot\leather_capture_tool.py"
 Read-Host "Press Enter to exit"

@@ -1,0 +1,5 @@
+sample_id,piece_id,side,surface_type,image_path,mask_path,has_mask,grade,size_category,has_defect,defect_count,defects,defect_scratch,defect_hole,defect_discoloration,defect_scar,defect_wrinkle,defect_vein_marks,defect_lamp_skin,defect_spots,defect_color_variation,defect_other,file_size_kb,notes,timestamp
+Piece_20261124_201524_front,Piece_20261124_201524,front,Grain,Piece_20261124_201524/front.jpg,Piece_20261124_201524/front_mask.png,0,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,5500.0,,2026-11-24T20:15:18.517719
+Piece_20261124_201524_back,Piece_20261124_201524,back,Suede,Piece_20261124_201524/back.jpg,Piece_20261124_201524/back_mask.png,0,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,5500.0,,2026-11-24T20:15:18.517719
+Piece_20261124_201857_front,Piece_20261124_201857,front,Grain,Piece_20261124_201857/front.jpg,Piece_20261124_201857/front_mask.png,0,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,5476.4,,2026-11-24T20:18:51.600843
+Piece_20261124_201857_back,Piece_20261124_201857,back,Suede,Piece_20261124_201857/back.jpg,Piece_20261124_201857/back_mask.png,0,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,5499.7,,2026-11-24T20:18:51.600843
