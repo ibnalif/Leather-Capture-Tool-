@@ -1,3 +1,7 @@
 opencv-python
 numpy
 pillow
+flask
+werkzeug
+pandas
+matplotlib

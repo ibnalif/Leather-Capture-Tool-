@@ -1,11 +1,10 @@
 {
-  "_comment": "Edit this file to change what appears in the app. No code changes needed. Restart the app after editing.",
-
+  "_comment": "Configuration for Leather Dual-Side Capture & Grading System",
+  "camera_source": "0",
+  "server_port": 5000,
+  "output_directory": "dataset",
   "grades": ["A", "B", "C", "D", "Waste"],
-
   "size_categories": ["5ft", "6ft", "7ft", "8ft", "9ft", "10ft", "11ft", "12ft"],
-
-
   "defect_types": [
     "Vein Marks",
     "Lamp Skin",
@@ -13,12 +12,13 @@
     "Scars",
     "Wrinkles",
     "Holes",
-    "Color Variation"
+    "Color Variation",
+    "Thickness Variation"
   ],
-
   "text_fields": [
     "thickness_mm",
     "operator_name",
     "batch_id"
-  ]
+  ],
+  "adb_path": ""
 }

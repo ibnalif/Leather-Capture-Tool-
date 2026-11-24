@@ -1,0 +1,3 @@
+piece_id,grade,size_category,has_defect,defect_count,defects,defect_scratch,defect_hole,defect_discoloration,defect_scar,defect_wrinkle,defect_vein_marks,defect_lamp_skin,defect_spots,defect_color_variation,defect_other,front_image,back_image,front_mask,back_mask,front_size_kb,back_size_kb,notes,timestamp
+Piece_20261124_201524,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,Piece_20261124_201524/front.jpg,Piece_20261124_201524/back.jpg,Piece_20261124_201524/front_mask.png,Piece_20261124_201524/back_mask.png,5500.0,5500.0,,2026-11-24T20:15:18.517719
+Piece_20261124_201857,A,Medium,0,0,,0,0,0,0,0,0,0,0,0,0,Piece_20261124_201857/front.jpg,Piece_20261124_201857/back.jpg,Piece_20261124_201857/front_mask.png,Piece_20261124_201857/back_mask.png,5476.4,5499.7,,2026-11-24T20:18:51.600843
