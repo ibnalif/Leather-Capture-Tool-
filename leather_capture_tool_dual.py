@@ -9,9 +9,15 @@ import queue
 import subprocess
 import shutil
 
-import cv2
-import numpy as np
-from PIL import Image, ImageTk
+# Try importing cv2 and PIL gracefully so server NEVER fails to start
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageTk
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -159,7 +165,6 @@ def upload_pair():
     front_file.save(front_path)
     back_file.save(back_path)
 
-    # Normalize fields from both the mobile app and legacy tools
     grade_val = metadata_dict.get("grade", "A")
     size_val = metadata_dict.get("size") or metadata_dict.get("size_category", "")
     defects_val = metadata_dict.get("defects") or metadata_dict.get("defect_types_present", [])
@@ -187,6 +192,8 @@ def upload_pair():
         "metadata": metadata_record
     })
 
+    print(f"\n[SERVER SUCCESS] Saved {piece_id} into {piece_dir}")
+
     return jsonify({
         "success": True,
         "piece_id": piece_id,
@@ -198,6 +205,7 @@ def run_flask_server(port):
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
+    print(f"[SERVER] Starting background ingestion server on port {port}...")
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
@@ -240,7 +248,7 @@ class LeatherDualCaptureApp:
         self.tool_var = tk.StringVar(value="pen")
         self.brush_size = tk.IntVar(value=PEN_THICKNESS)
         self.zoom_text = tk.StringVar(value="Zoom: 1.0x")
-        self.status_var = tk.StringVar(value="Waiting for mobile phone capture over USB...")
+        self.status_var = tk.StringVar(value="Waiting for mobile phone capture over USB or Wi-Fi...")
         self.usb_status_var = tk.StringVar(value="USB Server starting...")
 
         self._build_ui()
@@ -252,7 +260,7 @@ class LeatherDualCaptureApp:
         port = self.config_data.get("server_port", 5000)
         t = threading.Thread(target=run_flask_server, args=(port,), daemon=True)
         t.start()
-        self.usb_status_var.set(f"Server Port {port} Online")
+        self.usb_status_var.set(f"Port {port} Online")
 
     def _check_adb_bridge(self):
         port = self.config_data.get("server_port", 5000)
@@ -260,10 +268,10 @@ class LeatherDualCaptureApp:
         success, msg = setup_adb_reverse(port=port, custom_adb=custom_adb)
         if success:
             self.usb_status_var.set(f"USB Linked (Port {port})")
-            self.status_var.set("USB ADB reverse active. Ready to receive captures from phone!")
+            self.status_var.set("USB ADB active. Ready to receive captures from phone!")
         else:
-            self.usb_status_var.set(f"Port {port} Ready")
-            self.status_var.set(f"Server running on port {port}. ({msg})")
+            self.usb_status_var.set(f"Port {port} Listening")
+            self.status_var.set(f"Server online on port {port}. Wi-Fi ready, USB waiting for device.")
 
     def _build_ui(self):
         top_bar = ttk.Frame(self.root, padding=6)
@@ -343,17 +351,14 @@ class LeatherDualCaptureApp:
 
         ttk.Label(right, text="Leather Inspection & Metadata", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
 
-        # Grade
         ttk.Label(right, text="Quality Grade:").pack(anchor="w")
         self.grade_var = tk.StringVar(value=self.config_data["grades"][0] if self.config_data["grades"] else "A")
         ttk.OptionMenu(right, self.grade_var, self.grade_var.get(), *self.config_data["grades"]).pack(fill="x", pady=(0, 8))
 
-        # Size category
         ttk.Label(right, text="Size Category:").pack(anchor="w")
         self.size_var = tk.StringVar(value=self.config_data["size_categories"][0] if self.config_data["size_categories"] else "Medium")
         ttk.OptionMenu(right, self.size_var, self.size_var.get(), *self.config_data["size_categories"]).pack(fill="x", pady=(0, 8))
 
-        # Defect types
         ttk.Label(right, text="Defects Observed:").pack(anchor="w", pady=(4, 0))
         self.defect_frame = ttk.Frame(right)
         self.defect_frame.pack(fill="x", pady=(0, 4))
@@ -363,7 +368,6 @@ class LeatherDualCaptureApp:
             ttk.Checkbutton(self.defect_frame, text=defect, variable=var).pack(anchor="w")
             self.defect_vars[defect] = var
 
-        # Custom text fields
         ttk.Label(right, text="Additional Fields:").pack(anchor="w", pady=(6, 0))
         self.text_field_vars = {}
         for field_name in self.config_data["text_fields"]:
@@ -412,13 +416,14 @@ class LeatherDualCaptureApp:
         self.current_piece_id = item["piece_id"]
         self.current_piece_dir = item["piece_dir"]
 
-        self.front_img = cv2.imread(item["front_path"])
-        self.back_img = cv2.imread(item["back_path"])
+        if CV2_AVAILABLE:
+            self.front_img = cv2.imread(item["front_path"])
+            self.back_img = cv2.imread(item["back_path"])
 
-        if self.front_img is not None:
-            self.front_mask = np.zeros(self.front_img.shape[:2], dtype=np.uint8)
-        if self.back_img is not None:
-            self.back_mask = np.zeros(self.back_img.shape[:2], dtype=np.uint8)
+            if self.front_img is not None:
+                self.front_mask = np.zeros(self.front_img.shape[:2], dtype=np.uint8)
+            if self.back_img is not None:
+                self.back_mask = np.zeros(self.back_img.shape[:2], dtype=np.uint8)
 
         self.front_strokes = []
         self.back_strokes = []
@@ -429,7 +434,6 @@ class LeatherDualCaptureApp:
         if meta.get("size_category"):
             self.size_var.set(meta["size_category"])
 
-        # Reset existing checkboxes first
         for var in self.defect_vars.values():
             var.set(False)
 
@@ -443,7 +447,7 @@ class LeatherDualCaptureApp:
                 self.defect_vars[d] = var
 
         self.piece_title_var.set(f"Active: {self.current_piece_id}")
-        self.status_var.set(f"Received {self.current_piece_id}. Inspect & annotate Front and Back.")
+        self.status_var.set(f"Successfully received {self.current_piece_id}! Saved in folder.")
         self.save_btn.config(state="normal")
         self.side_var.set("front")
         self._on_switch_side()
@@ -460,11 +464,20 @@ class LeatherDualCaptureApp:
             return self.back_img, self.back_mask, self.back_strokes
 
     def _render(self):
+        if not CV2_AVAILABLE:
+            self.canvas.delete("all")
+            self.canvas.create_text(
+                CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2,
+                text=f"SUCCESS: Photos received and saved to disk!\n({self.current_piece_id or 'Waiting for uploads'})\n\nTo view and draw defect masks on PC canvas, run:\npip install opencv-python pillow",
+                fill="#4caf50", font=("Segoe UI", 12, "bold"), justify="center"
+            )
+            return
+
         img, mask, _ = self._get_active_data()
         if img is None:
             self.canvas.delete("all")
             self.canvas.create_text(CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2,
-                                    text="No leather image loaded.\nConnect Android App via USB and capture a pair.",
+                                    text="No leather image loaded.\nConnect Android App via USB or Wi-Fi and capture a pair.",
                                     fill="#777", font=("Segoe UI", 12), justify="center")
             return
 
@@ -519,6 +532,8 @@ class LeatherDualCaptureApp:
         self._render()
 
     def _zoom_at(self, cx, cy, factor):
+        if not CV2_AVAILABLE:
+            return
         img, _, _ = self._get_active_data()
         if img is None:
             return
@@ -560,6 +575,8 @@ class LeatherDualCaptureApp:
                 int(math.floor(self.view_y + cy / self._scale)))
 
     def _paint_stroke(self, mask, stroke):
+        if not CV2_AVAILABLE:
+            return
         value = MASK_FOREGROUND if stroke["tool"] == "pen" else MASK_BACKGROUND
         size, pts = stroke["size"], stroke["points"]
         if len(pts) == 1:
@@ -571,6 +588,8 @@ class LeatherDualCaptureApp:
                 cv2.circle(mask, p2, size // 2, value, -1)
 
     def _on_mouse_down(self, event):
+        if not CV2_AVAILABLE:
+            return
         img, mask, strokes = self._get_active_data()
         if img is None:
             return
@@ -586,6 +605,8 @@ class LeatherDualCaptureApp:
         self._render()
 
     def _on_mouse_drag(self, event):
+        if not CV2_AVAILABLE:
+            return
         self._mouse = (event.x, event.y)
         img, mask, strokes = self._get_active_data()
         if img is None or self._current_stroke is None:
@@ -609,6 +630,8 @@ class LeatherDualCaptureApp:
         self._last_point = None
 
     def undo_stroke(self):
+        if not CV2_AVAILABLE:
+            return
         img, mask, strokes = self._get_active_data()
         if img is None or not strokes:
             return
@@ -619,6 +642,8 @@ class LeatherDualCaptureApp:
         self._render()
 
     def clear_marks(self):
+        if not CV2_AVAILABLE:
+            return
         img, mask, strokes = self._get_active_data()
         if img is None:
             return
@@ -643,12 +668,13 @@ class LeatherDualCaptureApp:
         if not self.current_piece_dir:
             return
 
-        front_mask_path = os.path.join(self.current_piece_dir, "front_mask.png")
-        back_mask_path = os.path.join(self.current_piece_dir, "back_mask.png")
-        if self.front_mask is not None:
-            cv2.imwrite(front_mask_path, self.front_mask)
-        if self.back_mask is not None:
-            cv2.imwrite(back_mask_path, self.back_mask)
+        if CV2_AVAILABLE:
+            front_mask_path = os.path.join(self.current_piece_dir, "front_mask.png")
+            back_mask_path = os.path.join(self.current_piece_dir, "back_mask.png")
+            if self.front_mask is not None:
+                cv2.imwrite(front_mask_path, self.front_mask)
+            if self.back_mask is not None:
+                cv2.imwrite(back_mask_path, self.back_mask)
 
         metadata_path = os.path.join(self.current_piece_dir, "metadata.json")
         data = {}
