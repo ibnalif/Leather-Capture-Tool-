@@ -1,0 +1,17 @@
+{
+  "piece_id": "Piece_20261124_201857",
+  "received_at": "2026-11-24T20:18:51.600843",
+  "front_image": "front.jpg",
+  "back_image": "back.jpg",
+  "grade": "A",
+  "size_category": "Medium",
+  "defect_types_present": [],
+  "notes": "",
+  "raw_metadata": {
+    "piece_id": "Piece_20261124_201857",
+    "grade": "A",
+    "size": "Medium",
+    "defects": [],
+    "timestamp": "2026-11-24T14:18:57Z"
+  }
+}
