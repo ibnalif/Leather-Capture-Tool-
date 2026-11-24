@@ -40,16 +40,17 @@ DEFAULT_CONFIG = {
     "server_port": 5000,
     "output_directory": DEFAULT_DATASET_DIR,
     "grades": ["A", "B", "C", "D", "Waste"],
-    "size_categories": ["5ft", "6ft", "7ft", "8ft", "9ft", "10ft", "11ft", "12ft"],
+    "size_categories": ["Small", "Medium", "Large", "Full Hide", "5ft", "6ft", "7ft", "8ft", "9ft", "10ft", "11ft", "12ft"],
     "defect_types": [
+        "Scratch",
+        "Hole",
+        "Discoloration",
+        "Scar",
+        "Wrinkle",
         "Vein Marks",
         "Lamp Skin",
         "Spots",
-        "Scars",
-        "Wrinkles",
-        "Holes",
-        "Color Variation",
-        "Thickness Variation"
+        "Color Variation"
     ],
     "text_fields": ["thickness_mm", "operator_name", "batch_id"],
     "adb_path": ""
@@ -102,7 +103,7 @@ def setup_adb_reverse(port=5000, custom_adb=None):
         rev_cmd = subprocess.run([adb, "reverse", f"tcp:{port}", f"tcp:{port}"],
                                  capture_output=True, text=True, timeout=5)
         if rev_cmd.returncode == 0:
-            return True, f"ADB reverse active: tcp:{port} forwarded to device"
+            return True, f"ADB reverse active: tcp:{port} -> device"
         else:
             return False, f"ADB reverse failed: {rev_cmd.stderr.strip()}"
     except Exception as exc:
@@ -110,7 +111,7 @@ def setup_adb_reverse(port=5000, custom_adb=None):
 
 
 # ======================================================================
-# FLASK BACKGROUND SERVER
+# FLASK INGESTION SERVER
 # ======================================================================
 flask_app = Flask("LeatherReceiverServer")
 incoming_queue = queue.Queue()
@@ -158,17 +159,22 @@ def upload_pair():
     front_file.save(front_path)
     back_file.save(back_path)
 
+    # Normalize fields from both the mobile app and legacy tools
+    grade_val = metadata_dict.get("grade", "A")
+    size_val = metadata_dict.get("size") or metadata_dict.get("size_category", "")
+    defects_val = metadata_dict.get("defects") or metadata_dict.get("defect_types_present", [])
+
     metadata_path = os.path.join(piece_dir, "metadata.json")
     metadata_record = {
         "piece_id": piece_id,
         "received_at": datetime.datetime.now().isoformat(),
         "front_image": "front.jpg",
         "back_image": "back.jpg",
-        "grade": metadata_dict.get("grade", ""),
-        "size_category": metadata_dict.get("size_category", ""),
-        "defect_types_present": metadata_dict.get("defect_types_present", []),
+        "grade": grade_val,
+        "size_category": size_val,
+        "defect_types_present": defects_val,
         "notes": metadata_dict.get("notes", ""),
-        "custom_fields": metadata_dict.get("custom_fields", {})
+        "raw_metadata": metadata_dict
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata_record, f, indent=2)
@@ -196,23 +202,22 @@ def run_flask_server(port):
 
 
 # ======================================================================
-# MAIN TKINTER GUI APPLICATION
+# TKINTER GUI (DUAL-VIEW & DEFECT ANNOTATION)
 # ======================================================================
 class LeatherDualCaptureApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Leather Dual-Side Dataset & Grading Tool (PC Receiver)")
-        self.root.geometry("1280x820")
+        self.root.geometry("1280x840")
 
         self.config_data = load_config()
         self.output_dir = self.config_data.get("output_directory", DEFAULT_DATASET_DIR)
         os.makedirs(self.output_dir, exist_ok=True)
         active_server_ref["app_instance"] = self
 
-        # State for current piece
         self.current_piece_id = None
         self.current_piece_dir = None
-        self.current_side = "front"  # "front" or "back"
+        self.current_side = "front"
 
         self.front_img = None
         self.front_mask = None
@@ -257,36 +262,33 @@ class LeatherDualCaptureApp:
             self.usb_status_var.set(f"USB Linked (Port {port})")
             self.status_var.set("USB ADB reverse active. Ready to receive captures from phone!")
         else:
-            self.usb_status_var.set(f"USB Waiting (Port {port})")
+            self.usb_status_var.set(f"Port {port} Ready")
             self.status_var.set(f"Server running on port {port}. ({msg})")
 
     def _build_ui(self):
-        # Top toolbar: Directory selector + USB ADB status
         top_bar = ttk.Frame(self.root, padding=6)
         top_bar.pack(side="top", fill="x")
 
         ttk.Label(top_bar, text="Save Destination: ", font=("Segoe UI", 9, "bold")).pack(side="left")
         self.dir_label_var = tk.StringVar(value=self.output_dir)
-        dir_lbl = ttk.Label(top_bar, textvariable=self.dir_label_var, foreground="#0066cc", width=55)
+        dir_lbl = ttk.Label(top_bar, textvariable=self.dir_label_var, foreground="#0066cc", width=50)
         dir_lbl.pack(side="left", padx=4)
 
         ttk.Button(top_bar, text="Browse Folder...", command=self._select_output_dir).pack(side="left", padx=4)
         ttk.Button(top_bar, text="Refresh USB (ADB)", command=self._check_adb_bridge).pack(side="left", padx=6)
         
-        usb_badge = ttk.Label(top_bar, textvariable=self.usb_status_var, font=("Segoe UI", 9, "italic"), foreground="#007700")
+        usb_badge = ttk.Label(top_bar, textvariable=self.usb_status_var, font=("Segoe UI", 9, "bold"), foreground="#007700")
         usb_badge.pack(side="right", padx=10)
 
         sep = ttk.Separator(self.root, orient="horizontal")
         sep.pack(side="top", fill="x")
 
-        # Main Layout: Left Canvas / Controls, Right Metadata
         main = ttk.Frame(self.root, padding=8)
         main.pack(fill="both", expand=True)
 
         left = ttk.Frame(main)
         left.pack(side="left", fill="both", expand=True)
 
-        # Side toggle buttons (Front / Back)
         side_selector_bar = ttk.Frame(left)
         side_selector_bar.pack(fill="x", pady=(0, 6))
 
@@ -302,7 +304,6 @@ class LeatherDualCaptureApp:
                                         variable=self.side_var, command=self._on_switch_side)
         self.btn_back.pack(side="right", padx=8)
 
-        # Canvas
         self.canvas = tk.Canvas(left, width=CANVAS_WIDTH, height=CANVAS_HEIGHT, bg="#1a1a1a")
         self.canvas.pack(fill="both", expand=True)
 
@@ -317,7 +318,6 @@ class LeatherDualCaptureApp:
             self.canvas.bind(f"<B{b}-Motion>", self._on_pan_move)
             self.canvas.bind(f"<ButtonRelease-{b}>", self._on_pan_end)
 
-        # Annotation Tools Bar
         tools = ttk.Frame(left, padding=(0, 6))
         tools.pack(fill="x")
 
@@ -335,14 +335,13 @@ class LeatherDualCaptureApp:
         ttk.Button(tools, text="Fit View", command=self._reset_view).pack(side="left", padx=4)
         ttk.Label(tools, textvariable=self.zoom_text).pack(side="left", padx=6)
 
-        # Bottom status
         ttk.Label(left, textvariable=self.status_var, foreground="#333", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
 
-        # Right sidebar: Metadata and Save
-        right = ttk.Frame(main, width=300, padding=(12, 0))
+        # Right sidebar
+        right = ttk.Frame(main, width=320, padding=(12, 0))
         right.pack(side="right", fill="y")
 
-        ttk.Label(right, text="Leather Annotation & Metadata", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+        ttk.Label(right, text="Leather Inspection & Metadata", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
 
         # Grade
         ttk.Label(right, text="Quality Grade:").pack(anchor="w")
@@ -351,19 +350,21 @@ class LeatherDualCaptureApp:
 
         # Size category
         ttk.Label(right, text="Size Category:").pack(anchor="w")
-        self.size_var = tk.StringVar(value=self.config_data["size_categories"][0] if self.config_data["size_categories"] else "5ft")
+        self.size_var = tk.StringVar(value=self.config_data["size_categories"][0] if self.config_data["size_categories"] else "Medium")
         ttk.OptionMenu(right, self.size_var, self.size_var.get(), *self.config_data["size_categories"]).pack(fill="x", pady=(0, 8))
 
         # Defect types
         ttk.Label(right, text="Defects Observed:").pack(anchor="w", pady=(4, 0))
+        self.defect_frame = ttk.Frame(right)
+        self.defect_frame.pack(fill="x", pady=(0, 4))
         self.defect_vars = {}
         for defect in self.config_data["defect_types"]:
             var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(right, text=defect, variable=var).pack(anchor="w")
+            ttk.Checkbutton(self.defect_frame, text=defect, variable=var).pack(anchor="w")
             self.defect_vars[defect] = var
 
         # Custom text fields
-        ttk.Label(right, text="Additional Fields:").pack(anchor="w", pady=(10, 0))
+        ttk.Label(right, text="Additional Fields:").pack(anchor="w", pady=(6, 0))
         self.text_field_vars = {}
         for field_name in self.config_data["text_fields"]:
             ttk.Label(right, text=field_name.replace("_", " ").title()).pack(anchor="w")
@@ -381,7 +382,6 @@ class LeatherDualCaptureApp:
         self.samples_saved_var = tk.StringVar(value=self._count_saved_pieces())
         ttk.Label(right, textvariable=self.samples_saved_var, foreground="#666").pack(anchor="w", pady=(10, 0))
 
-        # Keybindings
         self.root.bind("<Control-z>", lambda e: self.undo_stroke())
         self.root.bind("p", lambda e: self.tool_var.set("pen"))
         self.root.bind("e", lambda e: self.tool_var.set("eraser"))
@@ -423,18 +423,27 @@ class LeatherDualCaptureApp:
         self.front_strokes = []
         self.back_strokes = []
 
-        # Populate metadata
         meta = item["metadata"]
         if meta.get("grade"):
             self.grade_var.set(meta["grade"])
         if meta.get("size_category"):
             self.size_var.set(meta["size_category"])
-        for d in meta.get("defect_types_present", []):
+
+        # Reset existing checkboxes first
+        for var in self.defect_vars.values():
+            var.set(False)
+
+        defects_list = meta.get("defect_types_present", [])
+        for d in defects_list:
             if d in self.defect_vars:
                 self.defect_vars[d].set(True)
+            else:
+                var = tk.BooleanVar(value=True)
+                ttk.Checkbutton(self.defect_frame, text=d, variable=var).pack(anchor="w")
+                self.defect_vars[d] = var
 
         self.piece_title_var.set(f"Active: {self.current_piece_id}")
-        self.status_var.set(f"Loaded paired photos for {self.current_piece_id}. Mark defects on Front & Back.")
+        self.status_var.set(f"Received {self.current_piece_id}. Inspect & annotate Front and Back.")
         self.save_btn.config(state="normal")
         self.side_var.set("front")
         self._on_switch_side()
@@ -444,9 +453,6 @@ class LeatherDualCaptureApp:
         self.current_side = self.side_var.get()
         self._reset_view()
 
-    # ------------------------------------------------------------------
-    # Canvas rendering
-    # ------------------------------------------------------------------
     def _get_active_data(self):
         if self.current_side == "front":
             return self.front_img, self.front_mask, self.front_strokes
@@ -633,9 +639,6 @@ class LeatherDualCaptureApp:
         color = "#ff3333" if self.tool_var.get() == "pen" else "#3399ff"
         self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=color, tags="cursor")
 
-    # ------------------------------------------------------------------
-    # Save Annotations
-    # ------------------------------------------------------------------
     def save_piece_annotations(self):
         if not self.current_piece_dir:
             return
