@@ -113,30 +113,62 @@ def find_adb():
     adb_bin = shutil.which("adb")
     if adb_bin:
         return adb_bin
+
+    candidates = [
+        os.path.join(SCRIPT_DIR, "adb.exe"),
+        os.path.join(SCRIPT_DIR, "platform-tools", "adb.exe"),
+    ]
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     if local_app_data:
-        standard_path = os.path.join(local_app_data, "Android", "Sdk", "platform-tools", "adb.exe")
-        if os.path.isfile(standard_path):
-            return standard_path
+        candidates.append(os.path.join(local_app_data, "Android", "Sdk", "platform-tools", "adb.exe"))
+    user_profile = os.environ.get("USERPROFILE", "")
+    if user_profile:
+        candidates.append(os.path.join(user_profile, "Downloads", "Plugcam_0.2.1_x64-portable", "resources", "adb.exe"))
+    candidates.extend([
+        r"C:\platform-tools\adb.exe",
+        r"C:\adb\adb.exe",
+    ])
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
     return None
 
 def setup_adb_reverse(port=5000, custom_adb=None):
-    adb = custom_adb or find_adb()
+    adb = custom_adb if (custom_adb and os.path.isfile(custom_adb)) else find_adb()
     if not adb:
         return False, "ADB not found (USB port-forwarding unavailable)."
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        proc = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=5)
+        # Start ADB daemon with DEVNULL streams so the forked server does not hold capture pipes open on Windows.
+        subprocess.run([adb, "start-server"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=15, creationflags=creation_flags)
+
+        proc = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10,
+                              creationflags=creation_flags)
         lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-        devices = [l for l in lines[1:] if "\tdevice" in l]
+        device_lines = lines[1:] if len(lines) > 1 else []
+        devices = [l.split()[0] for l in device_lines if "\tdevice" in l or l.endswith(" device")]
         if not devices:
+            if any("unauthorized" in l for l in device_lines):
+                return False, "Phone detected via USB, but USB Debugging is unauthorized (check phone prompt)."
             return False, "No Android device detected over USB."
-        
-        rev_cmd = subprocess.run([adb, "reverse", f"tcp:{port}", f"tcp:{port}"],
-                                 capture_output=True, text=True, timeout=5)
-        if rev_cmd.returncode == 0:
+
+        errors = []
+        linked = 0
+        for serial in devices:
+            rev_cmd = subprocess.run([adb, "-s", serial, "reverse", f"tcp:{port}", f"tcp:{port}"],
+                                     capture_output=True, text=True, timeout=10,
+                                     creationflags=creation_flags)
+            if rev_cmd.returncode == 0:
+                linked += 1
+            else:
+                errors.append(f"{serial}: {rev_cmd.stderr.strip() or 'unknown error'}")
+
+        if linked > 0:
             return True, f"ADB reverse active: tcp:{port} -> device"
-        else:
-            return False, f"ADB reverse failed: {rev_cmd.stderr.strip()}"
+        return False, f"ADB reverse failed: {'; '.join(errors)}"
     except Exception as exc:
         return False, f"ADB error: {str(exc)}"
 
@@ -152,24 +184,35 @@ active_server_ref = {"app_instance": None}
 def server_status():
     inst = active_server_ref.get("app_instance")
     out_dir = inst.output_dir if inst else DEFAULT_DATASET_DIR
+    mode = getattr(inst, "capture_mode", 2) if inst else 2
     return jsonify({
         "status": "online",
         "service": "Leather-Capture-Server-v2",
         "host_ip": get_local_ip(),
         "output_directory": out_dir,
+        "capture_mode": mode,
         "timestamp": datetime.datetime.now().isoformat()
     })
 
 @flask_app.route("/api/upload_pair", methods=["POST"])
+@flask_app.route("/api/upload_single", methods=["POST"])
+@flask_app.route("/api/upload", methods=["POST"])
 def upload_pair():
     inst = active_server_ref.get("app_instance")
     target_dir = inst.output_dir if inst else DEFAULT_DATASET_DIR
+    capture_mode = getattr(inst, "capture_mode", 2) if inst else 2
 
-    if "front_image" not in request.files or "back_image" not in request.files:
-        return jsonify({"success": False, "error": "Both front_image and back_image are required."}), 400
+    front_file = (
+        request.files.get("front_image")
+        or request.files.get("image")
+        or request.files.get("file")
+    )
+    if not front_file or not front_file.filename:
+        return jsonify({"success": False, "error": "front_image is required."}), 400
 
-    front_file = request.files["front_image"]
-    back_file = request.files["back_image"]
+    back_file = request.files.get("back_image")
+    has_back = bool(back_file and back_file.filename) and capture_mode == 2
+
     piece_id = request.form.get("piece_id", "").strip()
     if not piece_id:
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -183,42 +226,50 @@ def upload_pair():
     except Exception:
         metadata_dict = {}
 
-    piece_dir = os.path.join(target_dir, piece_id)
-    os.makedirs(piece_dir, exist_ok=True)
+    images_dir = os.path.join(target_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
 
-    front_path = os.path.join(piece_dir, "front.jpg")
-    back_path = os.path.join(piece_dir, "back.jpg")
+    front_filename = f"{piece_id}_front.jpg"
+    front_path = os.path.join(images_dir, front_filename)
     front_file.save(front_path)
-    back_file.save(back_path)
+
+    back_filename = f"{piece_id}_back.jpg" if has_back else ""
+    back_path = os.path.join(images_dir, back_filename) if has_back else None
+    if has_back and back_path:
+        back_file.save(back_path)
 
     grade_val = metadata_dict.get("grade", "A")
     size_val = metadata_dict.get("size") or metadata_dict.get("size_category", "Medium")
     defects_val = metadata_dict.get("defects") or metadata_dict.get("defect_types_present", [])
 
-    metadata_path = os.path.join(piece_dir, "metadata.json")
     metadata_record = {
         "piece_id": piece_id,
         "received_at": datetime.datetime.now().isoformat(),
-        "front_image": "front.jpg",
-        "back_image": "back.jpg",
+        "front_image": f"images/{front_filename}",
+        "back_image": f"images/{back_filename}" if has_back else "",
         "grade": grade_val,
         "size_category": size_val,
         "defect_types_present": defects_val,
         "notes": metadata_dict.get("notes", ""),
         "raw_metadata": metadata_dict
     }
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(metadata_record, f, indent=2)
+
+    try:
+        import dataset_manager
+        dataset_manager.upsert_piece_metadata(target_dir, piece_id, metadata_record)
+    except Exception as exc:
+        print(f"[WARN] Metadata save notice: {exc}")
 
     incoming_queue.put({
         "piece_id": piece_id,
-        "piece_dir": piece_dir,
+        "dataset_dir": target_dir,
         "front_path": front_path,
         "back_path": back_path,
         "metadata": metadata_record
     })
 
-    print(f"\n[RECEIVED PAIR] {piece_id} -> Saved to: {piece_dir}")
+    mode_label = "PAIR" if has_back else "FRONT"
+    print(f"\n[RECEIVED {mode_label}] {piece_id} -> Saved to: {images_dir}")
 
     # Automatically synchronize Kaggle metadata.csv & index
     try:
@@ -230,7 +281,8 @@ def upload_pair():
     return jsonify({
         "success": True,
         "piece_id": piece_id,
-        "message": f"Successfully received pair for {piece_id}."
+        "mode": 2 if has_back else 1,
+        "message": f"Successfully received {'pair' if has_back else 'front image'} for {piece_id}."
     }), 200
 
 def run_flask_server(port):
@@ -273,6 +325,7 @@ class LeatherCaptureApp:
         self.root.configure(bg=self.BG_MAIN)
 
         # State Variables
+        self.capture_mode = 2
         self.current_piece_id = None
         self.current_piece_dir = None
         self.current_side = "front"
@@ -301,12 +354,14 @@ class LeatherCaptureApp:
         self.status_var = tk.StringVar(value="Ready. Waiting for incoming photos from phone via USB or Wi-Fi...")
         self.usb_status_var = tk.StringVar(value="USB: Probing...")
         self.wifi_url_var = tk.StringVar(value=f"http://{self.local_ip}:{self.server_port}")
+        self.mode_badge_var = tk.StringVar(value="Mode: 2 Pics (F+B)")
 
         self._init_styles()
         self._build_ui()
         self._start_server_thread()
         self._check_adb_bridge()
         self._poll_incoming_queue()
+        self.root.after(120, self._prompt_capture_mode)
 
     def _init_styles(self):
         style = ttk.Style()
@@ -343,14 +398,30 @@ class LeatherCaptureApp:
         print(f"========================================================\n")
 
     def _check_adb_bridge(self):
-        custom_adb = self.config_data.get("adb_path", "").strip() or None
-        success, msg = setup_adb_reverse(port=self.server_port, custom_adb=custom_adb)
+        self.usb_status_var.set("USB: Probing...")
+        if hasattr(self, "lbl_usb"):
+            self.lbl_usb.config(fg=self.TEXT_ORANGE)
+
+        def _worker():
+            cfg = load_config()
+            self.config_data = cfg
+            custom_adb = cfg.get("adb_path", "").strip() or None
+            success, msg = setup_adb_reverse(port=self.server_port, custom_adb=custom_adb)
+            self.root.after(0, lambda: self._apply_adb_status(success, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_adb_status(self, success, msg):
         if success:
-            self.usb_status_var.set("USB: Linked (5000)")
-            self.status_var.set("USB cable linked via ADB reverse! Ready for captures.")
+            self.usb_status_var.set(f"USB: Linked ({self.server_port})")
+            if hasattr(self, "lbl_usb"):
+                self.lbl_usb.config(fg=self.TEXT_GREEN)
+            self.status_var.set(f"USB cable linked via ADB reverse (tcp:{self.server_port})! Set phone URL to http://127.0.0.1:{self.server_port}.")
         else:
             self.usb_status_var.set("USB: Waiting")
-            self.status_var.set(f"Server active. Use Wi-Fi (http://{self.local_ip}:{self.server_port}) or plug in USB.")
+            if hasattr(self, "lbl_usb"):
+                self.lbl_usb.config(fg=self.TEXT_ORANGE)
+            self.status_var.set(f"{msg} | Wi-Fi: http://{self.local_ip}:{self.server_port}")
 
     def _copy_wifi_url(self):
         url = self.wifi_url_var.get()
@@ -371,8 +442,19 @@ class LeatherCaptureApp:
     def _count_saved_pieces(self):
         if not os.path.isdir(self.output_dir):
             return "Total Saved Pieces: 0"
-        dirs = [d for d in os.listdir(self.output_dir) if os.path.isdir(os.path.join(self.output_dir, d))]
-        return f"Total Saved Pieces: {len(dirs)}"
+        try:
+            import dataset_manager
+            return f"Total Saved Pieces: {dataset_manager.count_saved_pieces(self.output_dir)}"
+        except Exception:
+            images_dir = os.path.join(self.output_dir, "images")
+            if not os.path.isdir(images_dir):
+                return "Total Saved Pieces: 0"
+            ids = {
+                f[:-len("_front.jpg")] if f.lower().endswith("_front.jpg") else f[:-len("_back.jpg")]
+                for f in os.listdir(images_dir)
+                if f.lower().endswith(("_front.jpg", "_back.jpg"))
+            }
+            return f"Total Saved Pieces: {len(ids)}"
 
     def _build_ui(self):
         # ---------------- TOP NAVIGATION BAR ----------------
@@ -392,6 +474,7 @@ class LeatherCaptureApp:
         dir_lbl.pack(side="left", padx=6)
         ttk.Button(top_bar, text="Browse...", style="Secondary.TButton", command=self._select_output_dir).pack(side="left", padx=2)
         ttk.Button(top_bar, text="📊 Sync Kaggle CSV", style="Secondary.TButton", command=self._sync_kaggle_csv).pack(side="left", padx=4)
+        ttk.Button(top_bar, textvariable=self.mode_badge_var, style="Secondary.TButton", command=self._prompt_capture_mode).pack(side="left", padx=4)
 
         # Right: Connection Badges
         btn_copy = ttk.Button(top_bar, text="Copy Wi-Fi URL", style="Secondary.TButton", command=self._copy_wifi_url)
@@ -407,8 +490,8 @@ class LeatherCaptureApp:
         # USB ADB Badge
         usb_frame = tk.Frame(top_bar, bg=self.BG_INPUT, padx=8, pady=3, highlightthickness=1, highlightbackground=self.BORDER_COLOR)
         usb_frame.pack(side="right", padx=6)
-        lbl_usb = tk.Label(usb_frame, textvariable=self.usb_status_var, bg=self.BG_INPUT, fg=self.TEXT_GREEN, font=("Segoe UI", 8, "bold"))
-        lbl_usb.pack(side="left")
+        self.lbl_usb = tk.Label(usb_frame, textvariable=self.usb_status_var, bg=self.BG_INPUT, fg=self.TEXT_ORANGE, font=("Segoe UI", 8, "bold"))
+        self.lbl_usb.pack(side="left")
         ttk.Button(top_bar, text="↻ Refresh USB", style="Secondary.TButton", command=self._check_adb_bridge).pack(side="right", padx=4)
 
         # ---------------- MAIN CONTENT SPLIT ----------------
@@ -540,6 +623,69 @@ class LeatherCaptureApp:
     # ------------------------------------------------------------------
     # INCOMING QUEUE POLLER
     # ------------------------------------------------------------------
+    def _prompt_capture_mode(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Capture Mode")
+        dialog.configure(bg=self.BG_CARD)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        w, h = 420, 210
+        self.root.update_idletasks()
+        rx = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        ry = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+        dialog.geometry(f"{w}x{h}+{max(rx, 0)}+{max(ry, 0)}")
+
+        tk.Label(
+            dialog, text="Capture Mode", bg=self.BG_CARD, fg=self.ACCENT_CYAN,
+            font=("Segoe UI", 13, "bold")
+        ).pack(pady=(18, 6))
+
+        tk.Label(
+            dialog,
+            text="How many pictures per leather piece do you want to capture?",
+            bg=self.BG_CARD, fg=self.TEXT_PRIMARY, font=("Segoe UI", 10),
+            wraplength=370, justify="center"
+        ).pack(pady=(0, 18))
+
+        btn_frame = tk.Frame(dialog, bg=self.BG_CARD)
+        btn_frame.pack(fill="x", padx=24)
+
+        def choose(mode):
+            self._set_capture_mode(mode)
+            dialog.destroy()
+
+        tk.Button(
+            btn_frame, text="1 Picture\n(Front Only)", bg=self.ACCENT_BLUE, fg="#FFFFFF",
+            activebackground="#2563EB", activeforeground="#FFFFFF",
+            font=("Segoe UI", 10, "bold"), relief="flat", pady=10, cursor="hand2",
+            command=lambda: choose(1)
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        tk.Button(
+            btn_frame, text="2 Pictures\n(Front & Back)", bg=self.BG_INPUT, fg=self.TEXT_PRIMARY,
+            activebackground="#32323E", activeforeground="#FFFFFF",
+            font=("Segoe UI", 10, "bold"), relief="flat", pady=10, cursor="hand2",
+            command=lambda: choose(2)
+        ).pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(self.capture_mode))
+        self.root.wait_window(dialog)
+
+    def _set_capture_mode(self, mode):
+        self.capture_mode = 1 if mode == 1 else 2
+        if self.capture_mode == 1:
+            self.mode_badge_var.set("Mode: 1 Pic (Front)")
+            self.btn_side_back.pack_forget()
+            self.side_var.set("front")
+            self.current_side = "front"
+        else:
+            self.mode_badge_var.set("Mode: 2 Pics (F+B)")
+            if not self.btn_side_back.winfo_manager():
+                self.btn_side_back.pack(side="right", padx=4, before=self.btn_side_front)
+        self._reset_view()
+
     def _poll_incoming_queue(self):
         while not incoming_queue.empty():
             item = incoming_queue.get()
@@ -548,11 +694,18 @@ class LeatherCaptureApp:
 
     def _load_piece(self, item):
         self.current_piece_id = item["piece_id"]
-        self.current_piece_dir = item["piece_dir"]
+        self.current_piece_dir = item.get("dataset_dir") or item.get("piece_dir") or self.output_dir
+
+        self.front_img = None
+        self.front_mask = None
+        self.back_img = None
+        self.back_mask = None
 
         if CV2_AVAILABLE:
-            self.front_img = cv2.imread(item["front_path"])
-            self.back_img = cv2.imread(item["back_path"])
+            if item.get("front_path"):
+                self.front_img = cv2.imread(item["front_path"])
+            if item.get("back_path"):
+                self.back_img = cv2.imread(item["back_path"])
 
             if self.front_img is not None:
                 self.front_mask = np.zeros(self.front_img.shape[:2], dtype=np.uint8)
@@ -583,7 +736,10 @@ class LeatherCaptureApp:
                 self.defect_vars[d] = var
 
         self.piece_title_var.set(f"Active: {self.current_piece_id}")
-        self.status_var.set(f"Received pair for {self.current_piece_id}! Saved to folder. Ready for review.")
+        if self.back_img is not None:
+            self.status_var.set(f"Received pair for {self.current_piece_id}! Saved to images/. Ready for review.")
+        else:
+            self.status_var.set(f"Received front photo for {self.current_piece_id}! Saved to images/. Ready for review.")
         self.save_btn.config(state="normal")
         self.side_var.set("front")
         self._on_switch_side()
@@ -615,8 +771,13 @@ class LeatherCaptureApp:
         img, mask, _ = self._get_active_data()
         if img is None:
             self.canvas.delete("all")
+            hint = (
+                "No leather hide loaded.\nCapture Front photo from the Android app\n(Connect via USB or Wi-Fi)."
+                if self.capture_mode == 1
+                else "No leather hide loaded.\nCapture Front and Back photos from the Android app\n(Connect via USB or Wi-Fi)."
+            )
             self.canvas.create_text(CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2,
-                                    text="No leather hide loaded.\nCapture Front and Back photos from the Android app\n(Connect via USB or Wi-Fi).",
+                                    text=hint,
                                     fill="#71717A", font=("Segoe UI", 12), justify="center")
             return
 
@@ -816,40 +977,36 @@ class LeatherCaptureApp:
             messagebox.showerror("Sync Error", f"Could not sync Kaggle CSV:\n{exc}")
 
     def save_piece_annotations(self):
-        if not self.current_piece_dir:
+        if not self.current_piece_id:
             return
 
+        dataset_dir = self.current_piece_dir or self.output_dir
+        masks_dir = os.path.join(dataset_dir, "masks")
+        os.makedirs(masks_dir, exist_ok=True)
+
         if CV2_AVAILABLE:
-            front_mask_path = os.path.join(self.current_piece_dir, "front_mask.png")
-            back_mask_path = os.path.join(self.current_piece_dir, "back_mask.png")
+            front_mask_path = os.path.join(masks_dir, f"{self.current_piece_id}_front_mask.png")
+            back_mask_path = os.path.join(masks_dir, f"{self.current_piece_id}_back_mask.png")
             if self.front_mask is not None:
                 cv2.imwrite(front_mask_path, self.front_mask)
             if self.back_mask is not None:
                 cv2.imwrite(back_mask_path, self.back_mask)
 
-        metadata_path = os.path.join(self.current_piece_dir, "metadata.json")
-        data = {}
-        if os.path.exists(metadata_path):
-            try:
-                with open(metadata_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                pass
-
-        data["grade"] = self.grade_var.get()
-        data["size_category"] = self.size_var.get()
-        data["defect_types_present"] = [name for name, var in self.defect_vars.items() if var.get()]
-        data["notes"] = self.notes_text.get("1.0", "end").strip()
-        data["custom_fields"] = {field: var.get() for field, var in self.text_field_vars.items()} if hasattr(self, 'text_field_vars') else {}
-        data["annotated_at"] = datetime.datetime.now().isoformat()
-
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        updates = {
+            "piece_id": self.current_piece_id,
+            "grade": self.grade_var.get(),
+            "size_category": self.size_var.get(),
+            "defect_types_present": [name for name, var in self.defect_vars.items() if var.get()],
+            "notes": self.notes_text.get("1.0", "end").strip(),
+            "custom_fields": {field: var.get() for field, var in self.text_field_vars.items()} if hasattr(self, 'text_field_vars') else {},
+            "annotated_at": datetime.datetime.now().isoformat(),
+        }
 
         # Automatically synchronize Kaggle metadata.csv with new masks and labels
         try:
             import dataset_manager
-            dataset_manager.sync_dataset_to_kaggle_format(self.output_dir)
+            dataset_manager.upsert_piece_metadata(dataset_dir, self.current_piece_id, updates)
+            dataset_manager.sync_dataset_to_kaggle_format(dataset_dir)
             self.samples_saved_var.set(self._count_saved_pieces())
         except Exception as exc:
             print(f"[WARN] Kaggle dataset sync notice: {exc}")

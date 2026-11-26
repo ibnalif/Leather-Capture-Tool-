@@ -2,8 +2,12 @@ import os
 import json
 import csv
 import shutil
+import threading
 from datetime import datetime
 from PIL import Image
+
+_METADATA_LOCK = threading.Lock()
+METADATA_INDEX_FILENAME = "pieces_metadata.json"
 
 KNOWN_DEFECTS = [
     "scratch",
@@ -28,10 +32,63 @@ def get_image_info(filepath):
     except Exception:
         return 0, 0, 0.0
 
+def load_pieces_metadata(dataset_root):
+    index_path = os.path.join(os.path.abspath(dataset_root), METADATA_INDEX_FILENAME)
+    if not os.path.exists(index_path):
+        return {}
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_pieces_metadata(dataset_root, data):
+    dataset_root = os.path.abspath(dataset_root)
+    os.makedirs(dataset_root, exist_ok=True)
+    index_path = os.path.join(dataset_root, METADATA_INDEX_FILENAME)
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def upsert_piece_metadata(dataset_root, piece_id, updates):
+    with _METADATA_LOCK:
+        all_meta = load_pieces_metadata(dataset_root)
+        existing = all_meta.get(piece_id, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        existing.update(updates)
+        all_meta[piece_id] = existing
+        save_pieces_metadata(dataset_root, all_meta)
+        return existing
+
+def _discover_piece_ids(dataset_root):
+    images_dir = os.path.join(dataset_root, "images")
+    piece_ids = set()
+    if os.path.isdir(images_dir):
+        for fname in os.listdir(images_dir):
+            lower = fname.lower()
+            if lower.endswith("_front.jpg"):
+                piece_ids.add(fname[:-len("_front.jpg")])
+            elif lower.endswith("_back.jpg"):
+                piece_ids.add(fname[:-len("_back.jpg")])
+    return sorted(piece_ids)
+
+def count_saved_pieces(dataset_root):
+    dataset_root = os.path.abspath(dataset_root)
+    if not os.path.isdir(dataset_root):
+        return 0
+    piece_ids = set(_discover_piece_ids(dataset_root))
+    for entry in os.listdir(dataset_root):
+        full_p = os.path.join(dataset_root, entry)
+        if os.path.isdir(full_p) and entry not in ("images", "masks", "metadata", ".git"):
+            if os.path.exists(os.path.join(full_p, "metadata.json")) or entry.startswith("Piece_"):
+                piece_ids.add(entry)
+    return len(piece_ids)
+
 def sync_dataset_to_kaggle_format(dataset_root):
     """
-    Scans the dataset directory, ensures centralized 'images/' and 'masks/'
-    folders are populated, and generates comprehensive 'metadata.csv' and
+    Scans the dataset directory ('images/', 'masks/', and 'pieces_metadata.json',
+    plus any legacy Piece_* folders if present) and generates 'metadata.csv' and
     'pieces_summary.csv' tailored for Kaggle EDA and ML pipelines.
     """
     dataset_root = os.path.abspath(dataset_root)
@@ -43,29 +100,57 @@ def sync_dataset_to_kaggle_format(dataset_root):
     os.makedirs(images_dir, exist_ok=True)
     os.makedirs(masks_dir, exist_ok=True)
 
-    # Find all piece folders (folders starting with Piece_ or containing metadata.json)
-    piece_dirs = []
-    for entry in os.listdir(dataset_root):
-        full_p = os.path.join(dataset_root, entry)
-        if os.path.isdir(full_p) and entry not in ("images", "masks", "metadata", ".git"):
-            if os.path.exists(os.path.join(full_p, "metadata.json")) or entry.startswith("Piece_"):
-                piece_dirs.append(full_p)
+    with _METADATA_LOCK:
+        all_meta = load_pieces_metadata(dataset_root)
+        meta_dirty = False
 
-    piece_dirs.sort()
+        # Backwards compatibility: import any legacy Piece_* folders if present
+        for entry in sorted(os.listdir(dataset_root)):
+            full_p = os.path.join(dataset_root, entry)
+            if os.path.isdir(full_p) and entry not in ("images", "masks", "metadata", ".git"):
+                if os.path.exists(os.path.join(full_p, "metadata.json")) or entry.startswith("Piece_"):
+                    piece_id = entry
+                    meta_file = os.path.join(full_p, "metadata.json")
+                    if os.path.exists(meta_file) and piece_id not in all_meta:
+                        try:
+                            with open(meta_file, "r", encoding="utf-8") as f:
+                                all_meta[piece_id] = json.load(f)
+                            meta_dirty = True
+                        except Exception:
+                            pass
+
+                    for side_key, raw_img_name, raw_mask_name in (
+                        ("front", "front.jpg", "front_mask.png"),
+                        ("back", "back.jpg", "back_mask.png"),
+                    ):
+                        src_img = os.path.join(full_p, raw_img_name)
+                        dest_img = os.path.join(images_dir, f"{piece_id}_{side_key}.jpg")
+                        if os.path.exists(src_img) and (not os.path.exists(dest_img) or os.path.getsize(dest_img) != os.path.getsize(src_img)):
+                            try:
+                                shutil.copy2(src_img, dest_img)
+                            except Exception:
+                                pass
+
+                        src_mask = os.path.join(full_p, raw_mask_name)
+                        dest_mask = os.path.join(masks_dir, f"{piece_id}_{side_key}_mask.png")
+                        if os.path.exists(src_mask) and (not os.path.exists(dest_mask) or os.path.getsize(dest_mask) != os.path.getsize(src_mask)):
+                            try:
+                                shutil.copy2(src_mask, dest_mask)
+                            except Exception:
+                                pass
+
+        if meta_dirty:
+            save_pieces_metadata(dataset_root, all_meta)
+
+    piece_ids = _discover_piece_ids(dataset_root)
 
     samples_rows = []
     pieces_rows = []
 
-    for p_dir in piece_dirs:
-        piece_id = os.path.basename(p_dir)
-        meta_file = os.path.join(p_dir, "metadata.json")
-        meta = {}
-        if os.path.exists(meta_file):
-            try:
-                with open(meta_file, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except Exception:
-                pass
+    for piece_id in piece_ids:
+        meta = all_meta.get(piece_id, {})
+        if not isinstance(meta, dict):
+            meta = {}
 
         grade = meta.get("grade", "A")
         size_cat = meta.get("size_category") or meta.get("size", "Medium")
@@ -93,10 +178,9 @@ def sync_dataset_to_kaggle_format(dataset_root):
             if not matched:
                 defect_flags["defect_other"] = 1
 
-        # Check front and back files
         sides = [
-            ("front", "Grain", "front.jpg", "front_mask.png"),
-            ("back", "Suede", "back.jpg", "back_mask.png")
+            ("front", "Grain"),
+            ("back", "Suede"),
         ]
 
         piece_summary = {
@@ -117,40 +201,22 @@ def sync_dataset_to_kaggle_format(dataset_root):
         }
         piece_summary.update(defect_flags)
 
-        for side_key, surface_label, raw_img_name, raw_mask_name in sides:
-            src_img = os.path.join(p_dir, raw_img_name)
-            src_mask = os.path.join(p_dir, raw_mask_name)
-
-            if not os.path.exists(src_img):
+        for side_key, surface_label in sides:
+            target_img_name = f"{piece_id}_{side_key}.jpg"
+            img_path = os.path.join(images_dir, target_img_name)
+            if not os.path.exists(img_path):
                 continue
 
-            target_img_name = f"{piece_id}_{side_key}.jpg"
-            dest_img = os.path.join(images_dir, target_img_name)
-            
-            # Sync image file if missing or modified
-            if not os.path.exists(dest_img) or os.path.getsize(dest_img) != os.path.getsize(src_img):
-                try:
-                    shutil.copy2(src_img, dest_img)
-                except Exception:
-                    pass
-
             target_mask_name = f"{piece_id}_{side_key}_mask.png"
-            dest_mask = os.path.join(masks_dir, target_mask_name)
-            has_mask = 0
-            if os.path.exists(src_mask):
-                if not os.path.exists(dest_mask) or os.path.getsize(dest_mask) != os.path.getsize(src_mask):
-                    try:
-                        shutil.copy2(src_mask, dest_mask)
-                    except Exception:
-                        pass
-                has_mask = 1
+            mask_path = os.path.join(masks_dir, target_mask_name)
+            has_mask = 1 if os.path.exists(mask_path) else 0
 
             # Relative paths for portable Kaggle notebooks
             rel_img = f"images/{target_img_name}"
             rel_mask = f"masks/{target_mask_name}" if has_mask else ""
 
-            w, h, ar = get_image_info(src_img)
-            fsize_kb = round(os.path.getsize(src_img) / 1024.0, 1)
+            w, h, ar = get_image_info(img_path)
+            fsize_kb = round(os.path.getsize(img_path) / 1024.0, 1)
 
             sample_row = {
                 "sample_id": f"{piece_id}_{side_key}",
